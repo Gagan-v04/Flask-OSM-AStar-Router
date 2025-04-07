@@ -2,6 +2,9 @@
 
 A web application demonstrating **A\*** pathfinding on **OpenStreetMap (OSM)** data for driving routes. This project uses Flask for the backend, Leaflet.js for the interactive map display, and calculates the estimated **fastest** driving route between two user-selected points, considering road types and speed limits.
 
+![Screenshot](screenshot.png)
+
+
 ## Features
 
 * **Interactive Map:** Uses Leaflet.js for a pannable, zoomable map interface.

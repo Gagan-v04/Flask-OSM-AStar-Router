@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Map Path Planner</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.3/leaflet.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.3/leaflet.css">
+    <style>
+        html, body { margin: 0; padding: 0; height: 100vh; width: 100vw; font-family: Arial, sans-serif; overflow: hidden; }
+        .container { display: flex; flex-direction: column; height: 100%; width: 100%; }
+        .controls { padding: 10px 15px; background-color: #f5f5f5; border-bottom: 1px solid #ddd; flex-shrink: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        #map_div { flex-grow: 1; width: 100%; background-color: #eee; overflow: hidden; position: relative; /* For positioning results panel */ }
+
+        /* --- Component Styles --- */
+        .btn { padding: 8px 15px; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .btn:disabled { background-color: #ccc; cursor: not-allowed; }
+        .btn-clear { background-color: #f44336; } 
+        .btn-clear:hover:not(:disabled) { background-color: #d32f2f; }
+        .btn-plan { background-color: #ff9800; } 
+        .btn-plan:hover:not(:disabled) { background-color: #f57c00; }
+
+        .file-label { padding: 8px 15px; background-color: #673AB7; color: white; border-radius: 4px; cursor: pointer; display: inline-block; }
+        .file-label:hover { background-color: #5e35b1; }
+        #fileInput { display: none; }
+        #fileNameDisplay { font-style: italic; color: #555; margin-right: 10px; }
+
+        .coord-display { font-weight: bold; margin-left: 5px; white-space: nowrap;}
+        .coord-display span { font-weight: normal; color: #333; font-family: monospace;}
+        .coord-display.start { color: #4CAF50; }
+        .coord-display.end { color: #f44336; }
+
+        .controls-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; }
+
+
+        .loading { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.6); display: flex; justify-content: center; align-items: center; z-index: 10000; display: none; color: white; font-size: 1.5em; text-align: center; }
+
+        #resultsPanel {
+            position: absolute;
+            bottom: 15px;
+            right: 10px;
+            background-color: rgba(255, 255, 255, 0.9);
+            padding: 8px 12px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.2);
+            z-index: 1000; 
+            font-size: 0.9em;
+            display: none; 
+            color: #333;
+            line-height: 1.5;
+            max-width: 200px; 
+        }
+        #resultsPanel strong { color: #000; display: inline-block; min-width: 70px; } /* Align labels */
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <label for="fileInput" class="file-label" title="Load GeoJSON road network">Load GeoJSON</label>
+            <input type="file" id="fileInput" accept=".geojson,application/geo+json">
+            <span id="fileNameDisplay">No GeoJSON loaded</span>
+            <div id="startPointDisplay" class="coord-display start">Start: <span>Not Set</span></div>
+            <div id="endPointDisplay" class="coord-display end">End: <span>Not Set</span></div>
+            <div class="controls-right">
+                <button id="planPathBtn" class="btn btn-plan" disabled title="Select Start and End points first">Plan Path</button>
+                <button id="clearBtn" class="btn btn-clear" title="Clear Start/End Points & Path">Clear All</button>
+            </div>
+        </div>
+        <div id="map_div">
+             <div id="resultsPanel"></div>
+        </div>
+        </div>
+    <div class="loading" id="loadingIndicator"> <p id="loadingText">Processing...</p> </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.3/leaflet.js"></script>
+    <script>
+        // --- Global Variables ---
+        let map;
+        let geoJsonLayer = null;
+        let currentGeoJsonFileName = "No GeoJSON loaded";
+        // REMOVED: let markers = []; let points = [];
+        let startLatLng = null; let endLatLng = null;
+        let startMarker = null; let endMarker = null;
+        let pathPolyline = null;
+
+        // --- DOM Elements ---
+        let fileInput, fileNameDisplay, clearBtn, /* removed saveBtn */ planPathBtn;
+        // REMOVED: let pointsListDiv;
+        let loadingIndicator, loadingText;
+        let startPointDisplay, endPointDisplay;
+        let resultsPanel; // For ETA/Dist display
+
+        // --- DIRECT LEAFLET INITIALIZATION ---
+        console.log("Initializing Leaflet map directly...");
+        try {
+             map = L.map('map_div').setView([12.9716, 77.5946], 12); // Bengaluru center
+             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors', maxZoom: 19
+             }).addTo(map);
+             console.log("Leaflet map initialized successfully:", map);
+         } catch(err) { console.error("Map Init Error:", err); alert("Map Init Error"); throw err; }
+
+        // --- Function to Initialize Features ---
+        function initializeMapFeatures() {
+            console.log("Initializing features bindings...");
+            if (!map) { console.error("Map object missing"); return; }
+            // Get DOM elements
+            fileInput = document.getElementById('fileInput'); fileNameDisplay = document.getElementById('fileNameDisplay');
+            clearBtn = document.getElementById('clearBtn'); planPathBtn = document.getElementById('planPathBtn');
+            loadingIndicator = document.getElementById('loadingIndicator'); loadingText = document.getElementById('loadingText');
+            startPointDisplay = document.getElementById('startPointDisplay').querySelector('span'); endPointDisplay = document.getElementById('endPointDisplay').querySelector('span');
+            resultsPanel = document.getElementById('resultsPanel'); // Get results panel
+
+            // Attach Event Listeners
+            fileInput.addEventListener('change', handleGeoJsonLoad); map.on('click', handleMapClick);
+            clearBtn.addEventListener('click', handleClearAll); planPathBtn.addEventListener('click', handlePlanPath);
+
+            // Initial State
+            updatePlanButtonState();
+            console.log("Features bindings initialized.");
+        }
+
+        // --- Event Handler Functions ---
+
+        function handleGeoJsonLoad(event) {
+            console.log("handleGeoJsonLoad started."); if (!map) { alert("Error: Map is not ready!"); return; }
+            const file = event.target.files[0]; if (!file) return;
+            console.log("GeoJSON file selected:", file.name); currentGeoJsonFileName = file.name; fileNameDisplay.textContent = `Loading: ${currentGeoJsonFileName}`; showLoading("Loading GeoJSON...");
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                 console.log("GeoJSON reader onload."); try {
+                     const fileContent = e.target.result; const geoJsonData = JSON.parse(fileContent); console.log("GeoJSON parsed."); if (geoJsonLayer && map.hasLayer(geoJsonLayer)) map.removeLayer(geoJsonLayer);
+                     geoJsonLayer = L.geoJSON(geoJsonData, { style: function (f) { switch (f.geometry.type) { case 'LineString': case 'MultiLineString': return { color: "#3388ff", weight: 8, opacity: 0.75 }; case 'Polygon': case 'MultiPolygon': return { fillColor: "#3388ff", color: "#000", weight: 1, fillOpacity: 0.2 }; default: return {}; } }, onEachFeature: function (f, l) { if (f.properties) { let p = '<pre style="max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">'; let pr = { ...f.properties }; if (pr.tags && typeof pr.tags === 'object'){p+=`<b>--- Tags ---</b>\n`; for(const k in pr.tags) p+=`<b>${k}:</b> ${JSON.stringify(pr.tags[k])}\n`; p+=`<b>------------</b>\n`; delete pr.tags;} for (const k in pr) p += `<b>${k}:</b> ${JSON.stringify(pr[k])}\n`; p+='</pre>'; l.bindPopup(p);} }, pointToLayer: function (f, latlng) { if (f.geometry && f.geometry.type === 'Point'){ return L.circleMarker(latlng, { radius: 6, fillColor: "#ff7800", color: "#000", weight: 1, opacity: 1, fillOpacity: 0.8 }); } return null; } }).addTo(map);
+                     console.log("GeoJSON layer added to map."); if (geoJsonLayer.getBounds().isValid()) map.fitBounds(geoJsonLayer.getBounds()); fileNameDisplay.textContent = `Loaded: ${currentGeoJsonFileName}`;
+                 } catch (error) { console.error("ERROR processing GeoJSON:", error); fileNameDisplay.textContent = `Error loading: ${currentGeoJsonFileName}`; alert(`Error loading/parsing GeoJSON '${currentGeoJsonFileName}': ${error.message}`); if (geoJsonLayer && map.hasLayer(geoJsonLayer)) map.removeLayer(geoJsonLayer); geoJsonLayer = null; } finally { hideLoading(); fileInput.value = ''; }
+             }; reader.onerror = (err) => { console.error("FileReader error:", err); alert(`Error reading file: ${err}`); hideLoading(); fileInput.value = ''; }; reader.readAsText(file);
+         }
+
+        function handleMapClick(e) {
+            const clickedLatLng = e.latlng; console.log(`Map clicked: ${clickedLatLng.lat.toFixed(6)}, ${clickedLatLng.lng.toFixed(6)}`);
+            const defaultIcon = L.icon({ iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.3/images/marker-icon-2x.png', shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.3/images/marker-shadow.png', iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41] });
+            if (!startLatLng) { startLatLng = clickedLatLng; if (startMarker) map.removeLayer(startMarker); startMarker = L.marker(startLatLng, { title: "Start", icon: defaultIcon }).addTo(map); startMarker.bindPopup(`<b>Start</b><br>${startLatLng.lat.toFixed(6)}, ${startLatLng.lng.toFixed(6)}`).openPopup(); startPointDisplay.textContent = `${startLatLng.lat.toFixed(5)}, ${startLatLng.lng.toFixed(5)}`; if (endLatLng) { map.removeLayer(endMarker); endMarker = null; endLatLng = null; endPointDisplay.textContent = "Not Set"; if (pathPolyline) { map.removeLayer(pathPolyline); pathPolyline = null; } } }
+            else if (!endLatLng) { if (clickedLatLng.lat === startLatLng.lat && clickedLatLng.lng === startLatLng.lng) return; endLatLng = clickedLatLng; if (endMarker) map.removeLayer(endMarker); endMarker = L.marker(endLatLng, { title: "End", icon: defaultIcon }).addTo(map); endMarker.bindPopup(`<b>End</b><br>${endLatLng.lat.toFixed(6)}, ${endLatLng.lng.toFixed(6)}`).openPopup(); endPointDisplay.textContent = `${endLatLng.lat.toFixed(5)}, ${endLatLng.lng.toFixed(5)}`; }
+            else { startLatLng = clickedLatLng; if (startMarker) map.removeLayer(startMarker); startMarker = L.marker(startLatLng, { title: "Start", icon: defaultIcon }).addTo(map); startMarker.bindPopup(`<b>Start</b><br>${startLatLng.lat.toFixed(6)}, ${startLatLng.lng.toFixed(6)}`).openPopup(); startPointDisplay.textContent = `${startLatLng.lat.toFixed(5)}, ${startLatLng.lng.toFixed(5)}`; if (endMarker) map.removeLayer(endMarker); endMarker = null; endLatLng = null; endPointDisplay.textContent = "Not Set"; if (pathPolyline) { map.removeLayer(pathPolyline); pathPolyline = null; } }
+            updatePlanButtonState();
+        }
+
+        function handleClearAll() {
+            console.log("Clearing start/end points and path...");
+            // Clear Start/End markers/coords
+            if (startMarker) map.removeLayer(startMarker); if (endMarker) map.removeLayer(endMarker);
+            startMarker = null; endMarker = null; startLatLng = null; endLatLng = null;
+            startPointDisplay.textContent = "Not Set"; endPointDisplay.textContent = "Not Set";
+            // Clear Path
+            if (pathPolyline) map.removeLayer(pathPolyline); pathPolyline = null;
+            // Hide results panel
+            if (resultsPanel) resultsPanel.style.display = 'none';
+            // Update button
+            updatePlanButtonState();
+            // NOTE: GeoJSON layer is intentionally NOT cleared here
+        }
+
+        // REMOVED handleSaveManualPoints function
+
+        function handlePlanPath() {
+            console.log("Plan Path requested."); if (!startLatLng || !endLatLng) { alert("Select Start and End points first."); return; }
+            showLoading("Calculating fastest path...");
+            if (resultsPanel) resultsPanel.style.display = 'none'; // Hide previous results
+            if (pathPolyline && map.hasLayer(pathPolyline)) map.removeLayer(pathPolyline); pathPolyline = null; // Clear previous path
+
+            const payload = { start_lat: startLatLng.lat, start_lng: startLatLng.lng, end_lat: endLatLng.lat, end_lng: endLatLng.lng };
+            fetch('/plan_path', { method: 'POST', headers: { 'Content-Type': 'application/json', }, body: JSON.stringify(payload), })
+            .then(response => { if (!response.ok) { return response.json().then(errData => { throw new Error(errData.error || `HTTP ${response.status}`); }).catch(() => { throw new Error(`HTTP ${response.status}`); }); } return response.json(); })
+            .then(data => {
+                 console.log("Received data:", data);
+                 if (data.error) { throw new Error(data.error); }
+                 // Draw Path
+                 if (data.path && data.path.length > 0) { pathPolyline = L.polyline(data.path, { color: 'red', weight: 5, opacity: 0.8 }).addTo(map); map.fitBounds(pathPolyline.getBounds().pad(0.1)); console.log("Path drawn."); }
+                 else { console.warn("No path data returned."); alert("Path planning succeeded but no path was found."); }
+                 // Display Stats
+                 if (resultsPanel && data.time_sec !== null && data.dist_m !== null && data.time_sec !== undefined && data.dist_m !== undefined) {
+                     const timeSec = data.time_sec; const distM = data.dist_m; let timeStr;
+                     if (timeSec < 60) { timeStr = `${Math.round(timeSec)} sec`; }
+                     else if (timeSec < 3600) { timeStr = `${Math.round(timeSec / 60)} min`; }
+                     else { const h = Math.floor(timeSec / 3600); const m = Math.round((timeSec % 3600) / 60); timeStr = `${h} hr ${m} min`; }
+                     const distKm = (distM / 1000).toFixed(1); const distStr = `${distKm} km`;
+                     const now = new Date(); const etaDate = new Date(now.getTime() + timeSec * 1000);
+                     const etaStr = etaDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }); // Added hour12
+                     resultsPanel.innerHTML = `<strong>Distance:</strong> ${distStr}<br><strong>Est. Time:</strong> ${timeStr}<br><strong>ETA:</strong> ${etaStr}`;
+                     resultsPanel.style.display = 'block';
+                 } else { if (resultsPanel) resultsPanel.style.display = 'none'; } // Hide if no stats
+             })
+            .catch(error => { console.error('Error planning path:', error); alert(`Failed to plan path: ${error.message}`); if (resultsPanel) resultsPanel.style.display = 'none'; if (pathPolyline && map.hasLayer(pathPolyline)) map.removeLayer(pathPolyline); pathPolyline = null; })
+            .finally(() => { hideLoading(); });
+        }
+
+        // --- Helper Functions ---
+        // REMOVED updatePointsList and deletePoint
+
+        function updatePlanButtonState() {
+             if (startLatLng && endLatLng) { planPathBtn.disabled = false; planPathBtn.title = "Calculate shortest path"; }
+             else { planPathBtn.disabled = true; let missing = []; if (!startLatLng) missing.push("Start point"); if (!endLatLng) missing.push("End point"); planPathBtn.title = `Select ${missing.join(' and ')} first`; }
+         }
+
+        function showLoading(message = "Processing...") { loadingText.textContent = message; loadingIndicator.style.display = 'flex'; }
+        function hideLoading() { loadingIndicator.style.display = 'none'; }
+
+        // --- Call initializeMapFeatures AFTER the DOM is ready ---
+        document.addEventListener('DOMContentLoaded', initializeMapFeatures);
+
+    </script>
+
+</body>
+</html>
